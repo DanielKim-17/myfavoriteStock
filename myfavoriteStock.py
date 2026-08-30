@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -38,11 +39,35 @@ def normalize_ticker(raw: str) -> str:
     return ticker.upper()
 
 
-def get_service_account_path() -> Optional[str]:
+def _read_json_from_string(value: str) -> Optional[dict]:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return None
+
+
+def get_service_account_info() -> Optional[dict]:
     for key in CREDENTIAL_ENV_KEYS:
         value = os.getenv(key)
         if value:
-            return value
+            if value.startswith("{"):
+                info = _read_json_from_string(value)
+                if info:
+                    return info
+            path = Path(value)
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        info = json.load(f)
+                    if isinstance(info, dict):
+                        return info
+                except Exception:
+                    pass
 
     default_candidates = [
         Path(__file__).resolve().parent / "google-service-account.json",
@@ -51,25 +76,52 @@ def get_service_account_path() -> Optional[str]:
     ]
     for candidate in default_candidates:
         if candidate.exists():
-            return str(candidate)
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                if isinstance(info, dict):
+                    return info
+            except Exception:
+                pass
+
+    try:
+        secrets = st.secrets
+        for key in ("google_service_account", "gcp_service_account", "service_account", "google_service_account_json"):
+            if hasattr(secrets, key):
+                value = getattr(secrets, key)
+                if isinstance(value, dict):
+                    return value
+                if isinstance(value, str):
+                    info = _read_json_from_string(value)
+                    if info:
+                        return info
+        if "connections" in dict(secrets):
+            conns = dict(secrets["connections"])
+            for key in ("gsheets", "google_sheets", "service_account"):
+                if key in conns and isinstance(conns[key], dict):
+                    return conns[key]
+    except Exception:
+        pass
+
     return None
 
 
 @st.cache_data(ttl=600)
 def load_favorite_sheet() -> pd.DataFrame:
     """Google Sheet의 myfavorite 시트를 읽어 카테고리와 종목 정보를 반환한다."""
-    cred_path = get_service_account_path()
-    if not cred_path:
-        raise RuntimeError(
-            "Google Service Account JSON 파일이 없습니다. "
-            "GOOGLE_SERVICE_ACCOUNT_JSON 또는 google-service-account.json 경로를 설정해 주세요."
-        )
-
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_file(cred_path, scopes=scope)
+    service_account_info = get_service_account_info()
+    if not service_account_info:
+        raise RuntimeError(
+            "Google Service Account 정보가 없습니다. "
+            ".streamlit/secrets.toml, GOOGLE_SERVICE_ACCOUNT_JSON, "
+            "또는 google-service-account.json 경로를 설정해 주세요."
+        )
+
+    creds = Credentials.from_service_account_info(service_account_info, scopes=scope)
     client = gspread.authorize(creds)
 
     workbook = client.open(SHEET_NAME)
