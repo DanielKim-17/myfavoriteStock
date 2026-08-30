@@ -86,20 +86,29 @@ def get_service_account_info() -> Optional[dict]:
 
     try:
         secrets = st.secrets
-        for key in ("google_service_account", "gcp_service_account", "service_account", "google_service_account_json"):
-            if hasattr(secrets, key):
-                value = getattr(secrets, key)
+        direct_keys = ("google_service_account", "gcp_service_account", "service_account", "google_service_account_json")
+        for key in direct_keys:
+            if key in dict(secrets):
+                value = secrets[key]
                 if isinstance(value, dict):
                     return value
                 if isinstance(value, str):
                     info = _read_json_from_string(value)
                     if info:
                         return info
+
         if "connections" in dict(secrets):
-            conns = dict(secrets["connections"])
+            conn = secrets["connections"]
             for key in ("gsheets", "google_sheets", "service_account"):
-                if key in conns and isinstance(conns[key], dict):
-                    return conns[key]
+                if key in dict(conn):
+                    value = conn[key]
+                    if isinstance(value, dict):
+                        return value
+
+        if "gsheets" in dict(secrets):
+            value = secrets["gsheets"]
+            if isinstance(value, dict):
+                return value
     except Exception:
         pass
 
