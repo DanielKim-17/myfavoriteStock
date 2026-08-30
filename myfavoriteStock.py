@@ -86,29 +86,61 @@ def get_service_account_info() -> Optional[dict]:
 
     try:
         secrets = st.secrets
-        direct_keys = ("google_service_account", "gcp_service_account", "service_account", "google_service_account_json")
+        secret_map = {}
+        try:
+            secret_map = st.secrets.to_dict()
+        except Exception:
+            try:
+                secret_map = dict(secrets)
+            except Exception:
+                secret_map = {}
+
+        def normalize_key(name: str) -> str:
+            return str(name).strip().lower().replace("-", "_")
+
+        normalized = {normalize_key(k): v for k, v in secret_map.items()}
+        direct_keys = (
+            "google_service_account",
+            "gcp_service_account",
+            "service_account",
+            "google_service_account_json",
+            "google_service_account_info",
+            "google_service_account_credentials",
+            "google_service_account_key",
+        )
         for key in direct_keys:
-            if key in dict(secrets):
-                value = secrets[key]
-                if isinstance(value, dict):
-                    return value
-                if isinstance(value, str):
-                    info = _read_json_from_string(value)
-                    if info:
-                        return info
-
-        if "connections" in dict(secrets):
-            conn = secrets["connections"]
-            for key in ("gsheets", "google_sheets", "service_account"):
-                if key in dict(conn):
-                    value = conn[key]
-                    if isinstance(value, dict):
-                        return value
-
-        if "gsheets" in dict(secrets):
-            value = secrets["gsheets"]
+            value = normalized.get(key)
             if isinstance(value, dict):
                 return value
+            if isinstance(value, str):
+                info = _read_json_from_string(value)
+                if info:
+                    return info
+
+        if "connections" in normalized:
+            conn = normalized["connections"]
+            if isinstance(conn, dict):
+                for key in ("gsheets", "google_sheets", "service_account"):
+                    if key in conn and isinstance(conn[key], dict):
+                        return conn[key]
+
+        if "gsheets" in normalized and isinstance(normalized["gsheets"], dict):
+            return normalized["gsheets"]
+
+        if all(k in normalized for k in ("type", "project_id", "private_key", "client_email")):
+            return {k: normalized[k] for k in (
+                "type",
+                "project_id",
+                "private_key_id",
+                "private_key",
+                "client_email",
+                "client_id",
+                "auth_uri",
+                "token_uri",
+                "auth_provider_x509_cert_url",
+                "client_x509_cert_url",
+                "universe_domain",
+            ) if k in normalized}
     except Exception:
         pass
 
