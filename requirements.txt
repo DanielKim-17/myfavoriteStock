@@ -1,0 +1,9 @@
+os
+pathlib
+typing
+numpy
+pandas
+yfinance
+gspread
+google.oauth2.service_account
+plotl
