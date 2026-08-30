@@ -5,5 +5,5 @@ numpy
 pandas
 yfinance
 gspread
-google.oauth2.service_account
+google
 plotl
