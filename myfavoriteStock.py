@@ -202,7 +202,7 @@ def fetch_daily_history(ticker: str, period: str = "1y") -> pd.DataFrame:
     """최근 1년치 주가 데이터를 yfinance에서 가져온다."""
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period=period, interval="1d", auto_adjust=False, actions=False)
+        hist = stock.history(period=period, interval="1d")
         if hist is None or hist.empty:
             return pd.DataFrame()
     except Exception:
@@ -231,6 +231,11 @@ def fetch_daily_history(ticker: str, period: str = "1y") -> pd.DataFrame:
     if hist.empty:
         return pd.DataFrame()
 
+    # Close, High, Low, Volume이 NaN인 행 제거 (배당금/분할 등으로 인한 NaN 제거)
+    hist = hist.dropna(subset=["Close", "High", "Low", "Volume"]).copy()
+    if hist.empty:
+        return pd.DataFrame()
+
     hist["Date"] = hist["Date"].dt.strftime("%Y-%m-%d")
     hist = hist.sort_values("Date").reset_index(drop=True)
     hist["Ticker"] = ticker
@@ -244,7 +249,6 @@ def build_stock_metrics(ticker: str) -> pd.DataFrame:
     if hist.empty:
         return pd.DataFrame()
 
-    hist = hist.copy()
     hist["Open"] = pd.to_numeric(hist.get("Open", pd.Series(index=hist.index, dtype=float)), errors="coerce")
     hist["High"] = pd.to_numeric(hist.get("High", pd.Series(index=hist.index, dtype=float)), errors="coerce")
     hist["Low"] = pd.to_numeric(hist.get("Low", pd.Series(index=hist.index, dtype=float)), errors="coerce")
@@ -309,6 +313,15 @@ def build_stock_metrics(ticker: str) -> pd.DataFrame:
     return hist
 
 
+def format_signal_ticker(row: pd.Series) -> str:
+    ticker = str(row.get("Ticker", ""))
+    current_price = row.get("현재가")
+    stoploss = row.get("stoploss")
+    if pd.notna(current_price) and pd.notna(stoploss) and float(current_price) <= float(stoploss):
+        return f"🔴 {ticker}"
+    return f"🟢 {ticker}"
+
+
 def get_category_table() -> pd.DataFrame:
     favorites = load_favorite_sheet()
     categories = sorted(favorites["Category"].dropna().unique().tolist())
@@ -323,22 +336,33 @@ def get_category_table() -> pd.DataFrame:
     rows = []
     for ticker in selection_df["Ticker"].tolist():
         hist = build_stock_metrics(ticker)
-        if hist.empty:
+        if hist.empty or len(hist) < 2:
             continue
-        last = hist.iloc[-1]
+        
+        # Close가 유효한 행만 필터 (NaN 행 제외)
+        hist_clean = hist.dropna(subset=['Close']).reset_index(drop=True)
+        if len(hist_clean) < 2:
+            continue
+        
+        # D-1 기준: 마지막에서 두 번째 (금일 제외)
+        metrics_prev = hist_clean.iloc[-2]
+        
+        # 현재가: 마지막 (금일)
+        current_price = hist_clean.iloc[-1]["Close"]
+        
         row = {
             "Ticker": ticker,
             "Ticker Name": ticker_names.get(ticker, ""),
-            "현재가": last["Close"],
-            "Min10": last["Min10"],
-            "Min20": last["Min20"],
-            "Moving28": last["Moving28"],
-            "stoploss": last["stoploss"],
-            "NvalueAbs": last["NvalueAbs"],
-            "NrateAbs": last["NrateAbs"],
-            "TR1": last["TR1"],
-            "TR2": last["TR2"],
-            "TR3": last["TR3"],
+            "현재가": current_price,
+            "Min10": metrics_prev["Min10"],
+            "Min20": metrics_prev["Min20"],
+            "Moving28": metrics_prev["Moving28"],
+            "stoploss": metrics_prev["stoploss"],
+            "NvalueAbs": metrics_prev["NvalueAbs"],
+            "NrateAbs": metrics_prev["NrateAbs"],
+            "TR1": metrics_prev["TR1"],
+            "TR2": metrics_prev["TR2"],
+            "TR3": metrics_prev["TR3"],
         }
         rows.append(row)
 
@@ -435,6 +459,16 @@ def build_detail_chart(df: pd.DataFrame, ticker: str) -> None:
     fig.update_yaxes(title_text="Indicator", row=4, col=1)
     st.plotly_chart(fig, use_container_width=True)
 
+    # 최근 10일의 저가를 가로 테이블로 표시
+    st.subheader("최근 10일 저가 (Low)")
+    hist_last_10 = hist.tail(10).copy()
+    low_table = hist_last_10[["Date", "Low"]].copy()
+    low_table["Low"] = low_table["Low"].round(2)
+    
+    # 가로 형태로 표시하기 위해 전치
+    low_table_transposed = low_table.set_index("Date").T
+    st.dataframe(low_table_transposed, use_container_width=True)
+
 
 def main() -> None:
     try:
@@ -457,20 +491,30 @@ def main() -> None:
     rows = []
     for ticker in selected_df["Ticker"].tolist():
         hist = build_stock_metrics(ticker)
-        if hist.empty:
+        if hist.empty or len(hist) < 2:
             continue
-        last = hist.iloc[-1]
-        name = selected_df.loc[selected_df["Ticker"] == ticker, "Ticker Name"].iloc[0] if not selected_df.loc[selected_df["Ticker"] == ticker].empty else ""
+        
+        # Close가 유효한 행만 필터 (NaN 행 제외)
+        hist_clean = hist.dropna(subset=['Close']).reset_index(drop=True)
+        if len(hist_clean) < 2:
+            continue
+        
+        # D-1 기준: 마지막에서 두 번째 (금일 제외)
+        metrics_prev = hist_clean.iloc[-2]
+        
+        # 현재가: 마지막 (금일)
+        current_price = hist_clean.iloc[-1]["Close"]
+        
         rows.append(
             {
                 "Ticker": ticker,
-                "현재가": last["Close"],
-                "Min10": last["Min10"],
-                "Min20": last["Min20"],
-                "Moving28": last["Moving28"],
-                "stoploss": last["stoploss"],
-                "NvalueAbs": last["NvalueAbs"],
-                "NrateAbs": last["NrateAbs"],
+                "현재가": current_price,
+                "stoploss": metrics_prev["stoploss"],
+                "Min10": metrics_prev["Min10"],
+                "Min20": metrics_prev["Min20"],
+                "Moving28": metrics_prev["Moving28"],
+                "NvalueAbs": metrics_prev["NvalueAbs"],
+                "NrateAbs": metrics_prev["NrateAbs"],
             }
         )
 
@@ -486,11 +530,26 @@ def main() -> None:
         if col in summary_display.columns:
             summary_display[col] = summary_display[col].map(lambda x: round(float(x), 2) if pd.notna(x) else x)
 
+    summary_display["Ticker"] = summary_display.apply(format_signal_ticker, axis=1)
+
     st.subheader(f"'{selected_category}' 종목 스크리닝")
 
     data_for_table = summary_display.copy()
+    styled_table = data_for_table.style.apply(
+        lambda row: [
+            (
+                "color: red; font-weight: bold;"
+                if pd.notna(row.get("현재가")) and pd.notna(row.get("stoploss")) and float(row["현재가"]) <= float(row["stoploss"])
+                else "color: green; font-weight: bold;"
+            )
+            if col == "Ticker"
+            else ""
+            for col in row.index
+        ],
+        subset=["Ticker"],
+    )
     selected = st.dataframe(
-        data_for_table,
+        styled_table,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -502,7 +561,7 @@ def main() -> None:
         st.stop()
 
     selected_row_idx = selected.selection.rows[0]
-    selected_ticker = data_for_table.loc[selected_row_idx, "Ticker"]
+    selected_ticker = data_for_table.loc[selected_row_idx, "Ticker"].replace("🟢 ", "").replace("🔴 ", "")
     st.subheader(f"선택 종목: {selected_ticker}")
     build_detail_chart(summary, selected_ticker)
 
