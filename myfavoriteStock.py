@@ -17,6 +17,9 @@ st.set_page_config(page_title="My Favorite Stock", layout="wide")
 
 
 SHEET_NAME = os.getenv("MYFAVORITE_SHEET_NAME", "myfavorite")
+CATEGORIES = ("매수", "매도", "매수대기", "매도대기", "기타")
+ADD_BUY_COLUMNS = ("1차 추가매수", "2차 추가매수")
+
 CREDENTIAL_ENV_KEYS = (
     "GOOGLE_SERVICE_ACCOUNT_JSON",
     "GOOGLE_SHEET_CREDENTIALS",
@@ -170,12 +173,14 @@ def load_favorite_sheet() -> pd.DataFrame:
     rows = worksheet.get_all_records()
 
     if not rows:
-        return pd.DataFrame(columns=["Category", "Ticker", "Ticker Name", "Name"])
+        return pd.DataFrame(columns=["Category", "Ticker", "Ticker Name", "Name", *ADD_BUY_COLUMNS])
 
     df = pd.DataFrame(rows)
     rename_map = {}
     for col in list(df.columns):
         key = str(col).strip().lower().replace(" ", "")
+        if key in {"1차추가매수", "2차추가매수"}:
+            rename_map[col] = key.replace("차", "차 ", 1)
         if key in {"category", "ticker", "name", "tickername"}:
             rename_map[col] = {"category": "Category", "ticker": "Ticker", "name": "Ticker Name", "tickername": "Ticker Name"}.get(key, col)
     if rename_map:
@@ -190,6 +195,11 @@ def load_favorite_sheet() -> pd.DataFrame:
         df["Ticker Name"] = ""
 
     df["Category"] = df["Category"].fillna("").astype(str).str.strip()
+    df["Category"] = df["Category"].where(df["Category"].isin(CATEGORIES), "기타")
+    for col in ADD_BUY_COLUMNS:
+        values = df[col] if col in df.columns else pd.Series("", index=df.index)
+        df[col] = pd.to_numeric(values.astype(str).str.replace(",", "", regex=False).str.strip(), errors="coerce")
+        df[col] = df[col].where(np.isfinite(df[col]))
     df["Ticker"] = df["Ticker"].fillna("").astype(str).str.strip()
     df["Ticker Name"] = df["Ticker Name"].fillna("").astype(str).str.strip()
     df = df[df["Ticker"] != ""].copy()
@@ -277,9 +287,11 @@ def build_stock_metrics(ticker: str) -> pd.DataFrame:
     hist["NvalueAbs"] = hist["NvalueAvg20"].abs()
     hist["NrateAbs"] = (hist["NvalueAvg20"] / hist["Close"]).abs().replace([np.inf, -np.inf], np.nan)
     hist["Min10"] = hist["Low"].rolling(window=10, min_periods=10).min()
+    hist["Min7"] = hist["Low"].rolling(window=7, min_periods=7).min()
+    hist["Max10"] = hist["High"].rolling(window=10, min_periods=10).max()
+    hist["Max7"] = hist["High"].rolling(window=7, min_periods=7).max()
     hist["Min20"] = hist["Low"].rolling(window=20, min_periods=20).min()
     hist["Moving28"] = hist["Close"].rolling(window=28, min_periods=28).mean()
-    hist["stoploss"] = hist[["Min10", "Moving28"]].min(axis=1)
 
     delta = hist["Close"].diff()
     gain = delta.clip(lower=0)
@@ -313,66 +325,88 @@ def build_stock_metrics(ticker: str) -> pd.DataFrame:
     return hist
 
 
+def is_sell_category(category: str) -> bool:
+    return category in {"매도", "매도대기"}
+
+
+def calculate_grade(price, first, second, category: str):
+    """경계값은 Grade 1, 누락되거나 역전된 추가매수 가격은 공란."""
+    if any(pd.isna(value) for value in (price, first, second)):
+        return pd.NA
+    if is_sell_category(category):
+        if first < second:
+            return pd.NA
+        return 0 if price > first else 2 if price < second else 1
+    if first > second:
+        return pd.NA
+    return 0 if price < first else 2 if price > second else 1
+
+
 def format_signal_ticker(row: pd.Series) -> str:
-    ticker = str(row.get("Ticker", ""))
-    current_price = row.get("현재가")
-    stoploss = row.get("stoploss")
-    if pd.notna(current_price) and pd.notna(stoploss) and float(current_price) <= float(stoploss):
-        return f"🔴 {ticker}"
-    return f"🟢 {ticker}"
+    price, stoploss = row.get("현재가"), row.get("stoploss")
+    sell = is_sell_category(row.get("Category", ""))
+    extreme = row.get("Max7" if sell else "Min7")
+    moving = row.get("Moving28")
+    signal = "🟡"
+    if all(pd.notna(value) for value in (price, stoploss, extreme, moving)):
+        if (price > stoploss) if sell else (price < stoploss):
+            signal = "🔴"
+        elif (price <= extreme and price <= moving) if sell else (price >= extreme and price >= moving):
+            signal = "🟢"
+    return f"{signal} {row.get('Ticker', '')}"
+
+
+def build_summary(selection_df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, favorite in selection_df.iterrows():
+        ticker = favorite["Ticker"]
+        hist = build_stock_metrics(ticker)
+        if hist.empty:
+            continue
+        hist = hist.dropna(subset=["Close"])
+        if len(hist) < 2:
+            continue
+        previous = hist.iloc[-2]
+        price = hist.iloc[-1]["Close"]
+        category = favorite["Category"]
+        sell = is_sell_category(category)
+        extreme = previous["Max7" if sell else "Min7"]
+        moving = previous["Moving28"]
+        stoploss = np.nan
+        if pd.notna(extreme) and pd.notna(moving):
+            stoploss = max(extreme, moving) if sell else min(extreme, moving)
+        first, second = (favorite.get(col, np.nan) for col in ADD_BUY_COLUMNS)
+        row = {
+            "Ticker": ticker,
+            "Ticker Name": favorite.get("Ticker Name", ""),
+            "Category": category,
+            "현재가": price,
+            "stoploss": stoploss,
+            "1차 추가매수": first,
+            "2차 추가매수": second,
+            "Grade": calculate_grade(price, first, second, category),
+        }
+        for col in ("Min10", "Min7", "Max10", "Max7", "Moving28", "NvalueAbs", "NrateAbs"):
+            row[col] = previous[col]
+        rows.append(row)
+    summary = pd.DataFrame(rows)
+    if not summary.empty:
+        summary["Grade"] = pd.array(summary["Grade"], dtype="Int64")
+        summary = summary.sort_values("현재가", ascending=False, na_position="last").reset_index(drop=True)
+    return summary
 
 
 def get_category_table() -> pd.DataFrame:
     favorites = load_favorite_sheet()
-    categories = sorted(favorites["Category"].dropna().unique().tolist())
+    categories = [category for category in CATEGORIES if category in favorites["Category"].values]
     st.sidebar.subheader("Category")
     selected_category = st.sidebar.selectbox("Category 선택", categories, index=0 if categories else None)
-
     selection_df = favorites[favorites["Category"] == selected_category].copy()
-    ticker_names = {}
-    for _, row in selection_df.iterrows():
-        ticker_names[row["Ticker"]] = row.get("Ticker Name", "") or ""
-
-    rows = []
-    for ticker in selection_df["Ticker"].tolist():
-        hist = build_stock_metrics(ticker)
-        if hist.empty or len(hist) < 2:
-            continue
-        
-        # Close가 유효한 행만 필터 (NaN 행 제외)
-        hist_clean = hist.dropna(subset=['Close']).reset_index(drop=True)
-        if len(hist_clean) < 2:
-            continue
-        
-        # D-1 기준: 마지막에서 두 번째 (금일 제외)
-        metrics_prev = hist_clean.iloc[-2]
-        
-        # 현재가: 마지막 (금일)
-        current_price = hist_clean.iloc[-1]["Close"]
-        
-        row = {
-            "Ticker": ticker,
-            "Ticker Name": ticker_names.get(ticker, ""),
-            "현재가": current_price,
-            "Min10": metrics_prev["Min10"],
-            "Min20": metrics_prev["Min20"],
-            "Moving28": metrics_prev["Moving28"],
-            "stoploss": metrics_prev["stoploss"],
-            "NvalueAbs": metrics_prev["NvalueAbs"],
-            "NrateAbs": metrics_prev["NrateAbs"],
-            "TR1": metrics_prev["TR1"],
-            "TR2": metrics_prev["TR2"],
-            "TR3": metrics_prev["TR3"],
-        }
-        rows.append(row)
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        st.warning(f"'{selected_category}' 카테고리에 해당하는 티커가 없습니다.")
+    summary = build_summary(selection_df)
+    if summary.empty:
+        st.warning(f"'{selected_category}' 카테고리에 유효한 종목이 없습니다.")
         st.stop()
-
-    df = df.sort_values("현재가", ascending=False, na_position="last").reset_index(drop=True)
-    return df, selected_category, selection_df
+    return summary, selected_category, selection_df
 
 
 def build_detail_chart(df: pd.DataFrame, ticker: str) -> None:
@@ -416,6 +450,19 @@ def build_detail_chart(df: pd.DataFrame, ticker: str) -> None:
     fig.add_trace(go.Scatter(x=x_dates, y=hist["MB"], mode="lines", name="MB", line=dict(color="green", width=1.2, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=x_dates, y=hist["UB"], mode="lines", name="UB", line=dict(color="gray", width=1, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=x_dates, y=hist["LB"], mode="lines", name="LB", line=dict(color="gray", width=1, dash="dot")), row=1, col=1)
+
+    selected_stock = df.loc[df["Ticker"] == ticker]
+    if not selected_stock.empty:
+        levels = selected_stock.iloc[0]
+        for column, label, color in (
+            ("stoploss", "Stoploss", "red"),
+            ("1차 추가매수", "1차 추가매수", "royalblue"),
+            ("2차 추가매수", "2차 추가매수", "purple"),
+        ):
+            value = levels.get(column)
+            if pd.notna(value):
+                fig.add_hline(y=float(value), line_dash="dash", line_color=color,
+                              annotation_text=f"{label}: {value:,.2f}", row=1, col=1)
 
     fig.add_trace(go.Bar(x=x_dates, y=hist["Volume"], name="Volume", marker_color="lightgray"), row=2, col=1)
     fig.add_trace(go.Scatter(x=x_dates, y=hist["OBV"], mode="lines", name="OBV", line=dict(color="purple", width=2)), row=3, col=1)
@@ -484,72 +531,31 @@ def main() -> None:
         st.warning("myfavorite 시트에 데이터가 없습니다.")
         st.stop()
 
-    categories = sorted(favorites["Category"].dropna().unique().tolist())
+    categories = [category for category in CATEGORIES if category in favorites["Category"].values]
     selected_category = st.selectbox("Category 선택", categories)
     selected_df = favorites[favorites["Category"] == selected_category].copy()
-
-    rows = []
-    for ticker in selected_df["Ticker"].tolist():
-        hist = build_stock_metrics(ticker)
-        if hist.empty or len(hist) < 2:
-            continue
-        
-        # Close가 유효한 행만 필터 (NaN 행 제외)
-        hist_clean = hist.dropna(subset=['Close']).reset_index(drop=True)
-        if len(hist_clean) < 2:
-            continue
-        
-        # D-1 기준: 마지막에서 두 번째 (금일 제외)
-        metrics_prev = hist_clean.iloc[-2]
-        
-        # 현재가: 마지막 (금일)
-        current_price = hist_clean.iloc[-1]["Close"]
-        
-        rows.append(
-            {
-                "Ticker": ticker,
-                "현재가": current_price,
-                "stoploss": metrics_prev["stoploss"],
-                "Min10": metrics_prev["Min10"],
-                "Min20": metrics_prev["Min20"],
-                "Moving28": metrics_prev["Moving28"],
-                "NvalueAbs": metrics_prev["NvalueAbs"],
-                "NrateAbs": metrics_prev["NrateAbs"],
-            }
-        )
-
-    summary = pd.DataFrame(rows)
+    summary = build_summary(selected_df)
     if summary.empty:
-        st.warning(f"'{selected_category}' 카테고리에서 유효한 종목을 찾지 못했습니다.")
+        st.warning(f"'{selected_category}' 카테고리에 유효한 종목이 없습니다.")
         st.stop()
 
-    summary = summary.sort_values("현재가", ascending=False, na_position="last").reset_index(drop=True)
+    # 신호등은 반올림 전 가격으로 계산한다.
     summary_display = summary.copy()
-    numeric_cols = ["현재가", "Min10", "Min20", "Moving28", "stoploss", "NvalueAbs", "NrateAbs"]
-    for col in numeric_cols:
-        if col in summary_display.columns:
-            summary_display[col] = summary_display[col].map(lambda x: round(float(x), 2) if pd.notna(x) else x)
-
-    summary_display["Ticker"] = summary_display.apply(format_signal_ticker, axis=1)
-
+    summary_display["신호등Ticker"] = summary.apply(format_signal_ticker, axis=1)
+    summary_display["NrateAbs_repeat"] = summary_display["NrateAbs"]
+    display_columns = ["신호등Ticker", "현재가", "Grade", "stoploss", "NrateAbs", "Moving28", "Min7", "Max7", "Min10", "Max10", "NvalueAbs", "NrateAbs_repeat"]
+    data_for_table = summary_display[display_columns].rename(columns={
+        "현재가": "현주가",
+        "Min10": "min10", "Min7": "min7", "Max10": "max10", "Max7": "max7", "Moving28": "moving28",
+    })
+    styled_table = data_for_table.style.format({
+        col: "{:.0f}" if col == "Grade" else "{:.2%}" if col in {"NrateAbs", "NrateAbs_repeat"} else "{:.2f}"
+        for col in data_for_table.columns if col != "신호등Ticker"
+    }, na_rep="")
     st.subheader(f"'{selected_category}' 종목 스크리닝")
-
-    data_for_table = summary_display.copy()
-    styled_table = data_for_table.style.apply(
-        lambda row: [
-            (
-                "color: red; font-weight: bold;"
-                if pd.notna(row.get("현재가")) and pd.notna(row.get("stoploss")) and float(row["현재가"]) <= float(row["stoploss"])
-                else "color: green; font-weight: bold;"
-            )
-            if col == "Ticker"
-            else ""
-            for col in row.index
-        ],
-        subset=["Ticker"],
-    )
     selected = st.dataframe(
         styled_table,
+        column_config={"NrateAbs_repeat": st.column_config.NumberColumn("NrateAbs")},
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -561,9 +567,9 @@ def main() -> None:
         st.stop()
 
     selected_row_idx = selected.selection.rows[0]
-    selected_ticker = data_for_table.loc[selected_row_idx, "Ticker"].replace("🟢 ", "").replace("🔴 ", "")
+    selected_ticker = summary.loc[selected_row_idx, "Ticker"]
     st.subheader(f"선택 종목: {selected_ticker}")
-    build_detail_chart(summary, selected_ticker)
+    build_detail_chart(summary.iloc[[selected_row_idx]], selected_ticker)
 
 
 if __name__ == "__main__":
