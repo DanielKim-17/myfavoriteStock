@@ -464,7 +464,17 @@ def build_detail_chart(df: pd.DataFrame, ticker: str) -> None:
                 fig.add_hline(y=float(value), line_dash="dash", line_color=color,
                               annotation_text=f"{label}: {value:,.2f}", row=1, col=1)
 
-    fig.add_trace(go.Bar(x=x_dates, y=hist["Volume"], name="Volume", marker_color="lightgray"), row=2, col=1)
+    volume_colors = np.where(hist["Close"] >= hist["Open"], "red", "blue")
+    fig.add_trace(
+        go.Bar(
+            x=x_dates,
+            y=hist["Volume"],
+            name="Volume",
+            marker_color=volume_colors,
+        ),
+        row=2,
+        col=1,
+    )
     fig.add_trace(go.Scatter(x=x_dates, y=hist["OBV"], mode="lines", name="OBV", line=dict(color="purple", width=2)), row=3, col=1)
     fig.add_trace(go.Scatter(x=x_dates, y=hist["RSI"], mode="lines", name="RSI", line=dict(color="firebrick", width=2)), row=4, col=1)
     fig.add_trace(go.Scatter(x=x_dates, y=hist["MFI"], mode="lines", name="MFI", line=dict(color="teal", width=2)), row=4, col=1)
