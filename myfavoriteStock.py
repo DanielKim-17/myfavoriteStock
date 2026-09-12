@@ -173,14 +173,14 @@ def load_favorite_sheet() -> pd.DataFrame:
     rows = worksheet.get_all_records()
 
     if not rows:
-        return pd.DataFrame(columns=["Category", "Ticker", "Ticker Name", "Name", *ADD_BUY_COLUMNS, "손절목표"])
+        return pd.DataFrame(columns=["Category", "Ticker", "Ticker Name", "Name", "최초거래", *ADD_BUY_COLUMNS, "손절목표"])
 
     df = pd.DataFrame(rows)
     rename_map = {}
     for col in list(df.columns):
         key = str(col).strip().lower().replace(" ", "")
-        if key == "손절목표":
-            rename_map[col] = "손절목표"
+        if key in {"최초거래", "손절목표"}:
+            rename_map[col] = key
         if key in {"1차추가매수", "2차추가매수"}:
             rename_map[col] = key.replace("차", "차 ", 1)
         if key in {"category", "ticker", "name", "tickername", "종목명"}:
@@ -198,7 +198,7 @@ def load_favorite_sheet() -> pd.DataFrame:
 
     df["Category"] = df["Category"].fillna("").astype(str).str.strip()
     df["Category"] = df["Category"].where(df["Category"].isin(CATEGORIES), "기타")
-    for col in (*ADD_BUY_COLUMNS, "손절목표"):
+    for col in ("최초거래", *ADD_BUY_COLUMNS, "손절목표"):
         values = df[col] if col in df.columns else pd.Series("", index=df.index)
         df[col] = pd.to_numeric(values.astype(str).str.replace(",", "", regex=False).str.strip(), errors="coerce")
         df[col] = df[col].where(np.isfinite(df[col]))
@@ -383,6 +383,7 @@ def build_summary(selection_df: pd.DataFrame) -> pd.DataFrame:
             "Ticker Name": favorite.get("Ticker Name", ""),
             "Category": category,
             "현재가": price,
+            "최초거래": favorite.get("최초거래", np.nan),
             "stoploss": stoploss,
             "1차 추가매수": first,
             "2차 추가매수": second,
@@ -459,6 +460,7 @@ def build_detail_chart(df: pd.DataFrame, ticker: str) -> None:
         levels = selected_stock.iloc[0]
         for column, label, color in (
             ("stoploss", "Stoploss", "red"),
+            ("최초거래", "최초거래", "teal"),
             ("1차 추가매수", "1차 추가매수", "royalblue"),
             ("2차 추가매수", "2차 추가매수", "purple"),
             ("손절목표", "손절목표", "darkorange"),
@@ -509,7 +511,7 @@ def build_detail_chart(df: pd.DataFrame, ticker: str) -> None:
     fig.update_layout(
         title=f"{ticker} 최근 1년 차트 (Candles / Volume / OBV / RSI / MFI)",
         template="plotly_white",
-        height=950,
+        height=1425,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
     )
@@ -557,7 +559,7 @@ def main() -> None:
     summary_display = summary.copy()
     summary_display["신호등Ticker"] = summary.apply(format_signal_ticker, axis=1)
     summary_display["NrateAbs_repeat"] = summary_display["NrateAbs"]
-    display_columns = ["신호등Ticker", "Ticker Name", "현재가", *ADD_BUY_COLUMNS, "손절목표", "Grade", "stoploss", "NrateAbs", "Moving28", "Min7", "Max7", "Min10", "Max10", "NvalueAbs", "NrateAbs_repeat"]
+    display_columns = ["신호등Ticker", "Ticker Name", "현재가", "최초거래", *ADD_BUY_COLUMNS, "손절목표", "Grade", "stoploss", "NrateAbs", "Moving28", "Min7", "Max7", "Min10", "Max10", "NvalueAbs", "NrateAbs_repeat"]
     data_for_table = summary_display[display_columns].rename(columns={
         "Ticker Name": "종목명",
         "현재가": "현주가",
