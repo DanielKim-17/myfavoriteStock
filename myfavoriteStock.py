@@ -181,8 +181,8 @@ def load_favorite_sheet() -> pd.DataFrame:
         key = str(col).strip().lower().replace(" ", "")
         if key in {"1차추가매수", "2차추가매수"}:
             rename_map[col] = key.replace("차", "차 ", 1)
-        if key in {"category", "ticker", "name", "tickername"}:
-            rename_map[col] = {"category": "Category", "ticker": "Ticker", "name": "Ticker Name", "tickername": "Ticker Name"}.get(key, col)
+        if key in {"category", "ticker", "name", "tickername", "종목명"}:
+            rename_map[col] = {"category": "Category", "ticker": "Ticker", "name": "Ticker Name", "tickername": "Ticker Name", "종목명": "Ticker Name"}.get(key, col)
     if rename_map:
         df = df.rename(columns=rename_map)
 
@@ -553,14 +553,15 @@ def main() -> None:
     summary_display = summary.copy()
     summary_display["신호등Ticker"] = summary.apply(format_signal_ticker, axis=1)
     summary_display["NrateAbs_repeat"] = summary_display["NrateAbs"]
-    display_columns = ["신호등Ticker", "현재가", "Grade", "stoploss", "NrateAbs", "Moving28", "Min7", "Max7", "Min10", "Max10", "NvalueAbs", "NrateAbs_repeat"]
+    display_columns = ["신호등Ticker", "Ticker Name", "현재가", *ADD_BUY_COLUMNS, "Grade", "stoploss", "NrateAbs", "Moving28", "Min7", "Max7", "Min10", "Max10", "NvalueAbs", "NrateAbs_repeat"]
     data_for_table = summary_display[display_columns].rename(columns={
+        "Ticker Name": "종목명",
         "현재가": "현주가",
         "Min10": "min10", "Min7": "min7", "Max10": "max10", "Max7": "max7", "Moving28": "moving28",
     })
     styled_table = data_for_table.style.format({
         col: "{:.0f}" if col == "Grade" else "{:.2%}" if col in {"NrateAbs", "NrateAbs_repeat"} else "{:.2f}"
-        for col in data_for_table.columns if col != "신호등Ticker"
+        for col in data_for_table.columns if col not in {"신호등Ticker", "종목명"}
     }, na_rep="")
     st.subheader(f"'{selected_category}' 종목 스크리닝")
     selected = st.dataframe(
